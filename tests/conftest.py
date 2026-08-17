@@ -6,10 +6,13 @@ from pathlib import Path
 
 
 def _agent_root() -> Path:
-    env = os.environ.get("AKASHIC_AGENT_ROOT", "").strip()
+    env = (
+        os.environ.get("ROXY_AGENT_ROOT", "").strip()
+        or os.environ.get("AKASHIC_AGENT_ROOT", "").strip()
+    )
     if env:
         return Path(env)
-    return Path(__file__).resolve().parents[3] / "akasic-agent"
+    return Path(__file__).resolve().parents[3] / "roxy-agent"
 
 
 root = _agent_root()

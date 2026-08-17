@@ -37,6 +37,7 @@ def _plugin_context(tmp_path: Path) -> PluginContext:
         kv_store=PluginKVStore(tmp_path / ".kv.json"),
         workspace=tmp_path,
         scope=scope,
+        _can_start_tasks=lambda: True,
     )
 
 
@@ -58,6 +59,7 @@ async def test_proactive_feedback_summary_empty(tmp_path: Path) -> None:
         kv_store=PluginKVStore(tmp_path / ".kv.json"),
         workspace=tmp_path,
         scope=scope,
+        _can_start_tasks=lambda: True,
     )
     plugin.activate()
     try:

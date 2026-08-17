@@ -1,6 +1,6 @@
-/// <reference path="../../types/akashic-dashboard.d.ts" />
+/// <reference path="../../types/roxy-dashboard.d.ts" />
 import { type ReactElement } from "react";
-import { Chip, api } from "@akashic/dashboard-ui";
+import { Chip, api } from "@roxy/dashboard-ui";
 
 interface Overview {
   total: number;
@@ -73,7 +73,7 @@ function _cellText(value: unknown): string {
 function _typeCell(value: unknown): string {
   const type = String(value || "");
   const tone = type === "explicit_quote" ? "accent" : type === "topic_follow" ? "success" : type === "unscored" ? "warning" : "muted";
-  return `<span class="${window.AkashicDashboard.ui.cx.badge(tone)}">${_escape(_feedbackTypeLabel(type))}</span>`;
+  return `<span class="${window.RoxyDashboard.ui.cx.badge(tone)}">${_escape(_feedbackTypeLabel(type))}</span>`;
 }
 
 function _confidenceTone(value: unknown): "success" | "warning" | "muted" {
@@ -85,7 +85,7 @@ function _confidenceTone(value: unknown): "success" | "warning" | "muted" {
 
 function _confidenceCell(value: unknown): string {
   const confidence = String(value || "-");
-  return `<span class="${window.AkashicDashboard.ui.cx.badge(_confidenceTone(confidence))}">${_escape(_confidenceLabel(confidence))}</span>`;
+  return `<span class="${window.RoxyDashboard.ui.cx.badge(_confidenceTone(confidence))}">${_escape(_confidenceLabel(confidence))}</span>`;
 }
 
 function FeedbackDetail(props: { item: Record<string, unknown> | null }): ReactElement {
@@ -146,7 +146,7 @@ function TimelineStep(props: { index: string; title: string; text: string; empha
   );
 }
 
-window.AkashicDashboard.registerPlugin({
+window.RoxyDashboard.registerPlugin({
   id: "proactive_feedback",
   label: "主动反馈",
   viewLabel: "主动反馈",
