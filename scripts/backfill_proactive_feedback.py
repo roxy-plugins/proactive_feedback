@@ -13,10 +13,9 @@ from pathlib import Path
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
 AGENT_ROOT = Path(
-    os.environ.get(
-        "AKASHIC_AGENT_ROOT",
-        str(Path(__file__).resolve().parents[3] / "akasic-agent"),
-    )
+    os.environ.get("ROXY_AGENT_ROOT", "").strip()
+    or os.environ.get("AKASHIC_AGENT_ROOT", "").strip()
+    or Path(__file__).resolve().parents[3] / "roxy-agent"
 )
 for root in (PLUGIN_ROOT, AGENT_ROOT):
     if str(root) not in sys.path:
@@ -55,9 +54,12 @@ def _resolve_workspace(explicit: Path | None) -> Path:
         if not raw_explicit:
             raise RuntimeError("--workspace 不能为空")
         return Path(raw_explicit).expanduser()
-    workspace = os.environ.get("AKASHIC_WORKSPACE", "").strip()
+    workspace = (
+        os.environ.get("ROXY_WORKSPACE", "").strip()
+        or os.environ.get("AKASHIC_WORKSPACE", "").strip()
+    )
     if not workspace:
-        raise RuntimeError("未提供 --workspace，且缺少 AKASHIC_WORKSPACE")
+        raise RuntimeError("未提供 --workspace，且缺少 ROXY_WORKSPACE")
     return Path(workspace).expanduser()
 
 

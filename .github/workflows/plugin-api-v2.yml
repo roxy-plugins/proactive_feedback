@@ -16,7 +16,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          repository: akashic-plugins/plugin-contracts
+          repository: roxy-plugins/plugin-contracts
           ref: 24543445c7b99ca63fcd90b5828f754a148b184c
           path: .plugin-contracts
       - uses: actions/setup-python@v5
