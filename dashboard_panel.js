@@ -1,5 +1,5 @@
-// ../proactive_feedback/dashboard_panel.tsx
-import { Chip, api } from "@akashic/dashboard-ui";
+// ../../roxy-plugin-migration-worktrees-20260818/proactive_feedback/dashboard_panel.tsx
+import { Chip, api } from "@roxy/dashboard-ui";
 import { jsx, jsxs } from "react/jsx-runtime";
 function _score(value) {
   return typeof value === "number" ? value.toFixed(3) : "-";
@@ -50,7 +50,7 @@ function _cellText(value) {
 function _typeCell(value) {
   const type = String(value || "");
   const tone = type === "explicit_quote" ? "accent" : type === "topic_follow" ? "success" : type === "unscored" ? "warning" : "muted";
-  return `<span class="${window.AkashicDashboard.ui.cx.badge(tone)}">${_escape(_feedbackTypeLabel(type))}</span>`;
+  return `<span class="${window.RoxyDashboard.ui.cx.badge(tone)}">${_escape(_feedbackTypeLabel(type))}</span>`;
 }
 function _confidenceTone(value) {
   const confidence = String(value || "");
@@ -60,7 +60,7 @@ function _confidenceTone(value) {
 }
 function _confidenceCell(value) {
   const confidence = String(value || "-");
-  return `<span class="${window.AkashicDashboard.ui.cx.badge(_confidenceTone(confidence))}">${_escape(_confidenceLabel(confidence))}</span>`;
+  return `<span class="${window.RoxyDashboard.ui.cx.badge(_confidenceTone(confidence))}">${_escape(_confidenceLabel(confidence))}</span>`;
 }
 function FeedbackDetail(props) {
   const item = props.item;
@@ -125,7 +125,7 @@ function TimelineStep(props) {
     ] })
   ] });
 }
-window.AkashicDashboard.registerPlugin({
+window.RoxyDashboard.registerPlugin({
   id: "proactive_feedback",
   label: "\u4E3B\u52A8\u53CD\u9988",
   viewLabel: "\u4E3B\u52A8\u53CD\u9988",
