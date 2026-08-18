@@ -14,7 +14,7 @@ from bus.events_proactive import ProactiveFeedbackRecorded
 from bus.events_lifecycle import TurnCommitted
 from memory2.embedder import Embedder
 
-from .db import FeedbackEvent, insert_feedback, open_db
+from .db import FeedbackEvent, insert_feedback, open_db, schema_version
 from .dashboard import ProactiveFeedbackDashboardReader
 from .scorer import (
     latest_turn_messages,
@@ -31,6 +31,7 @@ _QUEUE_MAX = 100
 
 class ProactiveFeedbackPlugin(Plugin):
     api_version = 2
+
     @classmethod
     def dashboard_module(cls) -> str | None:
         return "dashboard.py"
@@ -50,6 +51,8 @@ class ProactiveFeedbackPlugin(Plugin):
     version = "1.1.0"
 
     def activate(self) -> None:
+        """初始化反馈生产者并订阅已提交 turn。"""
+
         workspace = self.context.workspace
         if workspace is None:
             logger.warning("proactive_feedback 插件缺少 workspace，跳过加载")
@@ -57,6 +60,11 @@ class ProactiveFeedbackPlugin(Plugin):
         self._workspace = workspace
         self._sessions_db = workspace / "sessions.db"
         self._db_path = workspace / "proactive_feedback" / "proactive_feedback.db"
+        conn = open_db(self._db_path)
+        try:
+            version = schema_version(conn)
+        finally:
+            conn.close()
         self._queue: asyncio.Queue[TurnCommitted] = asyncio.Queue(maxsize=_QUEUE_MAX)
         self._embedder: Embedder | None = None
         self._worker_task = self.context.create_task(
@@ -64,8 +72,16 @@ class ProactiveFeedbackPlugin(Plugin):
             name="proactive_feedback_worker",
         )
         self.context.event_bus.on(TurnCommitted, self._on_turn_committed)
+        logger.info(
+            "event=producer_health status=ready db=%s schema_version=%d queue_max=%d",
+            self._db_path,
+            version,
+            _QUEUE_MAX,
+        )
 
     async def terminate(self) -> None:
+        """停止反馈 worker，并保留已提交的反馈记录。"""
+
         task = getattr(self, "_worker_task", None)
         if task is None:
             return
@@ -118,30 +134,69 @@ class ProactiveFeedbackPlugin(Plugin):
 
     def _on_turn_committed(self, event: TurnCommitted) -> None:
         if event.persisted_user_message is None:
+            logger.debug(
+                "event=producer_health status=ignored reason=missing_user_message "
+                "session=%s turn=%s",
+                event.session_key,
+                event.turn_id or "-",
+            )
             return
         queue = getattr(self, "_queue", None)
         if queue is None:
+            logger.error(
+                "event=producer_health status=error reason=queue_uninitialized "
+                "session=%s turn=%s",
+                event.session_key,
+                event.turn_id or "-",
+            )
             return
         try:
             queue.put_nowait(event)
+            logger.debug(
+                "event=producer_health status=queued session=%s turn=%s queue_size=%d",
+                event.session_key,
+                event.turn_id or "-",
+                queue.qsize(),
+            )
         except asyncio.QueueFull:
-            logger.warning("proactive_feedback queue full, drop session=%s", event.session_key)
+            logger.warning(
+                "event=producer_health status=degraded reason=queue_full "
+                "drop session=%s turn=%s",
+                event.session_key,
+                event.turn_id or "-",
+            )
 
     async def _run_worker(self) -> None:
+        logger.info("event=producer_health status=worker_started")
         while True:
             event = await self._queue.get()
             try:
                 await self._process(event)
             except Exception:
-                logger.exception("proactive_feedback process failed")
+                logger.exception(
+                    "event=producer_health status=error reason=process_failed "
+                    "session=%s turn=%s",
+                    event.session_key,
+                    event.turn_id or "-",
+                )
             finally:
                 self._queue.task_done()
 
     async def _process(self, event: TurnCommitted) -> None:
         user_text = event.persisted_user_message
         if not user_text or not event.assistant_response:
+            logger.debug(
+                "event=producer_health status=ignored reason=empty_turn session=%s turn=%s",
+                event.session_key,
+                event.turn_id or "-",
+            )
             return
         if not self._sessions_db.exists():
+            logger.warning(
+                "event=producer_health status=degraded reason=sessions_db_missing "
+                "path=%s",
+                self._sessions_db,
+            )
             return
 
         source = sqlite3.connect(self._sessions_db)
@@ -154,6 +209,12 @@ class ProactiveFeedbackPlugin(Plugin):
                 assistant_content=event.assistant_response,
             )
             if turn is None:
+                logger.debug(
+                    "event=producer_health status=ignored reason=turn_not_found "
+                    "session=%s turn=%s",
+                    event.session_key,
+                    event.turn_id or "-",
+                )
                 return
             user, assistant = turn
             quote = parse_quote_parts(user.content)
@@ -175,11 +236,19 @@ class ProactiveFeedbackPlugin(Plugin):
         finally:
             source.close()
         if not candidates:
+            logger.debug(
+                "event=producer_health status=ignored reason=no_proactive_candidate "
+                "session=%s turn=%s",
+                event.session_key,
+                event.turn_id or "-",
+            )
             return
 
         try:
             scored = await score_followup(
-                embed_batch=self._get_embedder().embed_batch if allow_pua else _no_embed,
+                embed_batch=(
+                    self._get_embedder().embed_batch if allow_pua else _no_embed
+                ),
                 user=user,
                 assistant=assistant,
                 candidates=candidates,
@@ -209,7 +278,17 @@ class ProactiveFeedbackPlugin(Plugin):
                 finally:
                     sink.close()
                 if event_id is not None:
-                    await self.context.event_bus.fanout(_recorded_event(event_id, feedback))
+                    await self.context.event_bus.fanout(
+                        _recorded_event(event_id, feedback)
+                    )
+                    logger.info(
+                        "event=feedback_recorded status=ready id=%d type=%s "
+                        "confidence=%s matched_by=%s",
+                        event_id,
+                        feedback.feedback_type,
+                        feedback.confidence,
+                        feedback.matched_by,
+                    )
         if scored is None:
             return
 
@@ -234,6 +313,14 @@ class ProactiveFeedbackPlugin(Plugin):
             sink.close()
         if event_id is not None:
             await self.context.event_bus.fanout(_recorded_event(event_id, feedback))
+            logger.info(
+                "event=feedback_recorded status=ready id=%d type=%s "
+                "confidence=%s matched_by=%s",
+                event_id,
+                feedback.feedback_type,
+                feedback.confidence,
+                feedback.matched_by,
+            )
 
     def _get_embedder(self) -> Embedder:
         if self._embedder is None:
@@ -253,27 +340,21 @@ class ProactiveFeedbackPlugin(Plugin):
             return {"total": 0, "by_type": [], "by_confidence": []}
         conn = open_db(Path(db_path))
         try:
-            total = conn.execute("SELECT count(*) FROM proactive_feedback_events").fetchone()[0]
-            by_type = _rows(
-                conn.execute(
-                    """
+            total = conn.execute(
+                "SELECT count(*) FROM proactive_feedback_events"
+            ).fetchone()[0]
+            by_type = _rows(conn.execute("""
                     SELECT feedback_type, count(*) AS count
                     FROM proactive_feedback_events
                     GROUP BY feedback_type
                     ORDER BY count DESC
-                    """
-                ).fetchall()
-            )
-            by_confidence = _rows(
-                conn.execute(
-                    """
+                    """).fetchall())
+            by_confidence = _rows(conn.execute("""
                     SELECT confidence, count(*) AS count
                     FROM proactive_feedback_events
                     GROUP BY confidence
                     ORDER BY count DESC
-                    """
-                ).fetchall()
-            )
+                    """).fetchall())
         finally:
             conn.close()
         return {"total": total, "by_type": by_type, "by_confidence": by_confidence}
@@ -289,7 +370,9 @@ def _build_embedder(workspace: Path) -> Embedder:
     )
 
 
-def _recorded_event(event_id: int, feedback: FeedbackEvent) -> ProactiveFeedbackRecorded:
+def _recorded_event(
+    event_id: int, feedback: FeedbackEvent
+) -> ProactiveFeedbackRecorded:
     return ProactiveFeedbackRecorded(
         event_id=event_id,
         session_key=feedback.session_key,
@@ -321,7 +404,11 @@ def _mobile_page_value(
     maximum: int,
 ) -> int:
     value = payload.get(name, default)
-    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= maximum:
+    if (
+        not isinstance(value, int)
+        or isinstance(value, bool)
+        or not 1 <= value <= maximum
+    ):
         raise MobileUiRpcInvalidRequest(f"{name} 必须是 1 到 {maximum} 的整数")
     return value
 

@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+import sqlite3
 import sys
+from datetime import datetime, timezone
+from types import SimpleNamespace
 from pathlib import Path
 
 import pytest
@@ -9,6 +13,7 @@ import pytest
 from agent.plugins.context import PluginContext, PluginKVStore
 from agent.plugins.scope import PluginScope, ScopedEventBus
 from bus.event_bus import EventBus
+from bus.events_lifecycle import TurnCommitted
 
 
 def _load_plugin_module():
@@ -37,12 +42,67 @@ def _plugin_context(tmp_path: Path) -> PluginContext:
         kv_store=PluginKVStore(tmp_path / ".kv.json"),
         workspace=tmp_path,
         scope=scope,
+        _can_start_tasks=lambda: True,
     )
 
 
 module = _load_plugin_module()
 ProactiveFeedbackPlugin = module.ProactiveFeedbackPlugin
 FeedbackEvent = module.FeedbackEvent
+
+
+def _write_sessions_db(path: Path) -> None:
+    conn = sqlite3.connect(path)
+    try:
+        _ = conn.execute("""
+            CREATE TABLE messages (
+                id TEXT PRIMARY KEY,
+                session_key TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                role TEXT NOT NULL,
+                content TEXT NOT NULL,
+                extra TEXT,
+                ts TEXT NOT NULL
+            )
+            """)
+        _ = conn.executemany(
+            """
+            INSERT INTO messages(id, session_key, seq, role, content, extra, ts)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    "p1",
+                    "web:test",
+                    1,
+                    "assistant",
+                    "AI Agent Runtime 趋势",
+                    json.dumps({"proactive": True}),
+                    "2026-08-18T10:00:00+00:00",
+                ),
+                (
+                    "u1",
+                    "web:test",
+                    2,
+                    "user",
+                    "请继续讲 AI Agent Runtime",
+                    None,
+                    "2026-08-18T10:01:00+00:00",
+                ),
+                (
+                    "a1",
+                    "web:test",
+                    3,
+                    "assistant",
+                    "下面继续解释 Runtime 的分层。",
+                    None,
+                    "2026-08-18T10:01:01+00:00",
+                ),
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
 
 
 @pytest.mark.asyncio
@@ -58,6 +118,7 @@ async def test_proactive_feedback_summary_empty(tmp_path: Path) -> None:
         kv_store=PluginKVStore(tmp_path / ".kv.json"),
         workspace=tmp_path,
         scope=scope,
+        _can_start_tasks=lambda: True,
     )
     plugin.activate()
     try:
@@ -66,6 +127,89 @@ async def test_proactive_feedback_summary_empty(tmp_path: Path) -> None:
         await plugin.terminate()
         assert await scope.aclose() == []
     assert summary["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_turn_committed_produces_feedback_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """真实 TurnCommitted fanout 应驱动 worker 写入反馈库。"""
+
+    _write_sessions_db(tmp_path / "sessions.db")
+    plugin = ProactiveFeedbackPlugin()
+    plugin.context = _plugin_context(tmp_path)
+
+    async def fake_score_followup(**kwargs: object) -> SimpleNamespace:
+        candidates = kwargs["candidates"]
+        assert isinstance(candidates, list)
+        return SimpleNamespace(
+            proactive=candidates[0],
+            pa_score=0.9,
+            pua_score=0.8,
+            matched_by="recent_pua",
+            feedback_type="topic_follow",
+            confidence="high",
+            reason="test_followup",
+            candidate_count=len(candidates),
+            lag_seconds=61,
+        )
+
+    monkeypatch.setattr(module, "score_followup", fake_score_followup)
+    monkeypatch.setattr(
+        plugin,
+        "_get_embedder",
+        lambda: SimpleNamespace(embed_batch=lambda texts: texts),
+    )
+    plugin.activate()
+    try:
+        db_path = tmp_path / "proactive_feedback" / "proactive_feedback.db"
+        assert db_path.exists()
+        event = TurnCommitted(
+            session_key="web:test",
+            channel="web",
+            chat_id="test",
+            input_message="请继续讲 AI Agent Runtime",
+            persisted_user_message="请继续讲 AI Agent Runtime",
+            assistant_response="下面继续解释 Runtime 的分层。",
+            tools_used=[],
+            turn_id="turn-1",
+            timestamp=datetime(2026, 8, 18, tzinfo=timezone.utc),
+        )
+        await plugin.context.event_bus.fanout(event)
+        await plugin._queue.join()
+        with module.open_db(db_path) as conn:
+            row = conn.execute(
+                "SELECT feedback_type, user_message_id, proactive_message_id "
+                "FROM proactive_feedback_events"
+            ).fetchone()
+        assert row is not None
+        assert row["feedback_type"] == "topic_follow"
+        assert row["user_message_id"] == "u1"
+        assert row["proactive_message_id"] == "p1"
+    finally:
+        await plugin.terminate()
+
+
+@pytest.mark.asyncio
+async def test_activate_initializes_schema(tmp_path: Path) -> None:
+    plugin = ProactiveFeedbackPlugin()
+    plugin.context = _plugin_context(tmp_path)
+    plugin.activate()
+    try:
+        db_path = tmp_path / "proactive_feedback" / "proactive_feedback.db"
+        assert db_path.exists()
+        with module.open_db(db_path) as conn:
+            assert module.schema_version(conn) == 1
+            columns = {
+                str(row[1])
+                for row in conn.execute(
+                    "PRAGMA table_info(proactive_feedback_events)"
+                ).fetchall()
+            }
+        assert "feedback_type" in columns
+        assert "user_message_id" in columns
+    finally:
+        await plugin.terminate()
 
 
 def test_recorded_event_matches_runtime_shape() -> None:
@@ -98,7 +242,9 @@ def test_recorded_event_matches_runtime_shape() -> None:
     assert event.matched_by == "recent_pua"
 
 
-def test_get_embedder_uses_workspace(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_get_embedder_uses_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     seen: list[Path] = []
 
     def fake_build_embedder(root: Path) -> object:
