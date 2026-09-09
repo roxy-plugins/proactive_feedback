@@ -61,7 +61,8 @@ export function eventRow(event) {
   preview.textContent = event.user_reply_preview || event.user_preview || "（没有用户回复摘要）";
   const hint = document.createElement("span");
   hint.className = "proactive-feedback-event__hint";
-  hint.textContent = "查看关联链路";
+  const relationLabel = event.matched_by === "discussion_source" ? "跨会话讨论 · 查看链路" : event.matched_by === "explicit_message_id" ? "精确消息引用 · 查看链路" : "查看关联链路";
+  hint.textContent = relationLabel;
   trigger.append(signal, time, preview, hint);
 
   const detail = document.createElement("div");
@@ -85,7 +86,7 @@ export function eventRow(event) {
     trigger.setAttribute("aria-expanded", String(expanded));
     detail.inert = !expanded;
     detail.setAttribute("aria-hidden", String(!expanded));
-    hint.textContent = expanded ? "收起关联链路" : "查看关联链路";
+    hint.textContent = expanded ? "收起关联链路" : relationLabel;
   });
   item.append(trigger, detail);
   return item;

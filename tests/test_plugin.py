@@ -54,6 +54,8 @@ FeedbackEvent = module.FeedbackEvent
 def _write_sessions_db(path: Path) -> None:
     conn = sqlite3.connect(path)
     try:
+        conn.execute("CREATE TABLE sessions (key TEXT PRIMARY KEY, metadata TEXT)")
+        conn.execute("INSERT INTO sessions VALUES ('web:test', '{}')")
         _ = conn.execute("""
             CREATE TABLE messages (
                 id TEXT PRIMARY KEY,

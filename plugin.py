@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 import logging
 import sqlite3
 from contextlib import suppress
@@ -18,6 +19,9 @@ from .db import FeedbackEvent, insert_feedback, open_db, schema_version
 from .dashboard import ProactiveFeedbackDashboardReader
 from .scorer import (
     latest_turn_messages,
+    referenced_proactive,
+    session_allows_feedback,
+    FeedbackScore,
     parse_quote_parts,
     proactive_since_previous_user,
     recent_proactive_messages,
@@ -48,7 +52,7 @@ class ProactiveFeedbackPlugin(Plugin):
         )
 
     name = "proactive_feedback"
-    version = "1.1.0"
+    version = "1.2.0"
 
     def activate(self) -> None:
         """初始化反馈生产者并订阅已提交 turn。"""
@@ -207,6 +211,8 @@ class ProactiveFeedbackPlugin(Plugin):
                 session_key=event.session_key,
                 user_content=user_text,
                 assistant_content=event.assistant_response,
+                user_message_id=event.persisted_user_message_id,
+                assistant_message_id=event.assistant_message_id,
             )
             if turn is None:
                 logger.debug(
@@ -217,9 +223,16 @@ class ProactiveFeedbackPlugin(Plugin):
                 )
                 return
             user, assistant = turn
+            if not session_allows_feedback(source, event.session_key):
+                return
+            reference, reference_kind = referenced_proactive(source, session_key=event.session_key, user=user)
+            if reference_kind == 'invalid_reference':
+                return
             quote = parse_quote_parts(user.content)
-            allow_pua = not bool(quote.quoted_text)
-            if quote.quoted_text:
+            allow_pua = reference is not None or not bool(quote.quoted_text)
+            if reference is not None:
+                candidates = [reference]
+            elif quote.quoted_text:
                 candidates = recent_proactive_messages(
                     source,
                     session_key=event.session_key,
@@ -245,15 +258,18 @@ class ProactiveFeedbackPlugin(Plugin):
             return
 
         try:
-            scored = await score_followup(
-                embed_batch=(
-                    self._get_embedder().embed_batch if allow_pua else _no_embed
-                ),
-                user=user,
-                assistant=assistant,
-                candidates=candidates,
-                allow_pua=allow_pua,
-            )
+            if reference is not None and reference_kind == "explicit_message_id":
+                scored = FeedbackScore(reference, 1.0, 1.0, reference_kind, "explicit_quote", "gold", "canonical_message_reference", 1, int((datetime.fromisoformat(user.ts) - datetime.fromisoformat(reference.ts)).total_seconds()))
+            else:
+                scored = await score_followup(
+                    embed_batch=(
+                        self._get_embedder().embed_batch if allow_pua else _no_embed
+                    ),
+                    user=user,
+                    assistant=assistant,
+                    candidates=candidates,
+                    allow_pua=allow_pua,
+                )
         except Exception:
             logger.exception("proactive_feedback scoring failed")
             scored = None
@@ -305,7 +321,7 @@ class ProactiveFeedbackPlugin(Plugin):
                 pua_score=scored.pua_score,
                 lag_seconds=scored.lag_seconds,
                 candidate_count=scored.candidate_count,
-                matched_by=scored.matched_by,
+                matched_by=reference_kind or scored.matched_by,
                 reason=scored.reason,
             )
             event_id = insert_feedback(sink, feedback)

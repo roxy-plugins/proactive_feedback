@@ -140,10 +140,8 @@ def insert_feedback(conn: sqlite3.Connection, event: FeedbackEvent) -> int | Non
         ).fetchone()
         if existing is not None:
             return None
-    _ = conn.execute(
-        "DELETE FROM proactive_feedback_events WHERE user_message_id = ?",
-        (event.user_message_id,),
-    )
+    if conn.execute("SELECT 1 FROM proactive_feedback_events WHERE user_message_id=?", (event.user_message_id,)).fetchone() is not None:
+        return None
     cursor = conn.execute(
         """
         INSERT INTO proactive_feedback_events (
