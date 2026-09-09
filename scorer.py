@@ -103,7 +103,20 @@ def latest_turn_messages(
     session_key: str,
     user_content: str,
     assistant_content: str,
+    user_message_id: str | None = None,
+    assistant_message_id: str | None = None,
 ) -> tuple[MessageRow, MessageRow] | None:
+    if user_message_id is not None or assistant_message_id is not None:
+        if not user_message_id or not assistant_message_id:
+            return None
+        rows = [conn.execute("SELECT id,seq,role,content,extra,ts,session_key FROM messages WHERE id=?", (identity,)).fetchone()
+                for identity in (user_message_id, assistant_message_id)]
+        user, assistant = rows
+        if user is None or assistant is None or user['session_key'] != session_key or assistant['session_key'] != session_key:
+            return None
+        if user['role'] != 'user' or assistant['role'] != 'assistant' or user['seq'] >= assistant['seq']:
+            return None
+        return _row(user), _row(assistant)
     user = conn.execute(
         """
         SELECT id, seq, role, content, extra, ts
@@ -249,6 +262,51 @@ def proactive_since_previous_user(
     if limit is None:
         return proactive
     return proactive[:limit]
+
+
+def session_allows_feedback(conn: sqlite3.Connection, session_key: str) -> bool:
+    row = conn.execute("SELECT metadata FROM sessions WHERE key=?", (session_key,)).fetchone()
+    if row is None:
+        return False
+    metadata = json.loads(row['metadata'] or '{}')
+    return not (metadata.get('proactive_context') is False or metadata.get('private') is True or metadata.get('archived') is True
+                or metadata.get('archived_at') or metadata.get('skip_post_memory') is True)
+
+
+def referenced_proactive(conn: sqlite3.Connection, *, session_key: str, user: MessageRow) -> tuple[MessageRow | None, str]:
+    """Resolve only canonical message IDs or the Core-owned discussion source."""
+    extra = json.loads(user.extra or '{}')
+    reference = extra.get('reply_to_message_id')
+    explicit = isinstance(reference, str) and bool(reference)
+    metadata_row = conn.execute("SELECT metadata FROM sessions WHERE key=?", (session_key,)).fetchone()
+    metadata = json.loads(metadata_row['metadata'] or '{}') if metadata_row else {}
+    source = metadata.get('discussion_source')
+    if not explicit and isinstance(source, dict):
+        reference = source.get('message_id')
+    if not isinstance(reference, str) or not reference:
+        return None, ''
+    seen = set()
+    for _ in range(8):
+        if reference in seen:
+            return None, 'invalid_reference'
+        seen.add(reference)
+        row = conn.execute("SELECT id,seq,role,content,extra,ts,session_key FROM messages WHERE id=?", (reference,)).fetchone()
+        if row is None or row['session_key'].split(':',1)[0] != session_key.split(':',1)[0]:
+            return None, 'invalid_reference'
+        if row['session_key'] != session_key and not session_key.startswith('mobile:'):
+            return None, 'invalid_reference'
+        if not session_allows_feedback(conn, row['session_key']) or datetime.fromisoformat(row['ts']) > datetime.fromisoformat(user.ts):
+            return None, 'invalid_reference'
+        if not explicit and isinstance(source, dict) and row['session_key'] != source.get('session_id'):
+            return None, 'invalid_reference'
+        if row['role'] == 'assistant' and is_proactive(row['extra']):
+            return _row(row), 'explicit_message_id' if explicit else 'discussion_source'
+        refs = json.loads(row['extra'] or '{}').get('source_refs', [])
+        linked = [r for r in refs if isinstance(r, dict) and r.get('kind') == 'discussion_source']
+        if len(linked) != 1 or not isinstance(linked[0].get('message_id'), str):
+            return None, ''
+        source = linked[0]; reference = source['message_id']; explicit = False
+    return None, 'invalid_reference'
 
 
 async def score_followup(
